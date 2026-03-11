@@ -302,6 +302,7 @@ def build_player_stats_embed(player: dict, overview: dict) -> discord.Embed:
 def extract_gamelog_entries(gamelog: dict) -> list[dict]:
     entries = []
 
+    # Try a simple events pattern first
     if "events" in gamelog and isinstance(gamelog["events"], list):
         for event in gamelog["events"]:
             opponent = event.get("opponent", {}).get("displayName", "Opponent")
@@ -321,6 +322,7 @@ def extract_gamelog_entries(gamelog: dict) -> list[dict]:
                 "value": " • ".join(stat_parts) if stat_parts else "No stats available"
             })
 
+    # Fallback if ESPN shape differs
     if not entries:
         display = gamelog.get("displayName") or "Game Log"
         entries.append({
