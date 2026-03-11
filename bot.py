@@ -16,8 +16,14 @@ ESPN_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nf
 ESPN_NEWS_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/news"
 ESPN_SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary?event={event_id}"
 ESPN_ATHLETES_URL = "https://sports.core.api.espn.com/v3/sports/football/nfl/athletes?limit=20000&active=true"
+ESPN_ATHLETES_ALL_URL = "https://sports.core.api.espn.com/v3/sports/football/nfl/athletes?limit=20000&active=false"
 ESPN_ATHLETE_OVERVIEW_URL = "https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/athletes/{athlete_id}/overview"
+ESPN_ATHLETE_OVERVIEW_SEASON_URL = "https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/athletes/{athlete_id}/overview?season={season}"
 ESPN_ATHLETE_GAMELOG_URL = "https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/athletes/{athlete_id}/gamelog"
+ESPN_ATHLETE_GAMELOG_SEASON_URL = "https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/athletes/{athlete_id}/gamelog?season={season}"
+
+CURRENT_SEASON = datetime.now().year
+VALID_SEASONS = list(range(2000, CURRENT_SEASON + 1))
 
 TEAM_LOGOS = {
     "ARI": "https://a.espncdn.com/i/teamlogos/nfl/500/ari.png",
@@ -129,32 +135,41 @@ async def get_news_items(limit: int = 5) -> list[dict]:
 
 async def build_player_index() -> None:
     global PLAYER_INDEX, PLAYER_LOOKUP
-    data = await fetch_json(ESPN_ATHLETES_URL)
 
-    fresh_index = []
     fresh_lookup = {}
 
-    for item in data.get("items", []):
-        athlete_id = str(item.get("id", ""))
-        display_name = item.get("displayName") or item.get("fullName")
-        if not athlete_id or not display_name:
+    for url in (ESPN_ATHLETES_URL, ESPN_ATHLETES_ALL_URL):
+        try:
+            data = await fetch_json(url)
+        except Exception:
             continue
 
-        position = item.get("position", {}).get("abbreviation", "UNK")
-        team = item.get("team", {}).get("abbreviation", "FA")
+        for item in data.get("items", []):
+            athlete_id = str(item.get("id", ""))
+            display_name = item.get("displayName") or item.get("fullName")
+            if not athlete_id or not display_name:
+                continue
 
-        player = {
-            "id": athlete_id,
-            "name": display_name,
-            "position": position,
-            "team": team,
-            "search": normalize_name(display_name),
-            "label": f"{display_name} ({team}, {position})",
-        }
-        fresh_index.append(player)
-        fresh_lookup[athlete_id] = player
+            if athlete_id in fresh_lookup:
+                continue
 
-    PLAYER_INDEX = fresh_index
+            position = item.get("position", {}).get("abbreviation", "UNK")
+            team = item.get("team", {}).get("abbreviation", "FA")
+            active = item.get("active", True)
+            status_label = "" if active else " • Retired"
+
+            player = {
+                "id": athlete_id,
+                "name": display_name,
+                "position": position,
+                "team": team,
+                "active": active,
+                "search": normalize_name(display_name),
+                "label": f"{display_name} ({team}, {position}{status_label})",
+            }
+            fresh_lookup[athlete_id] = player
+
+    PLAYER_INDEX = list(fresh_lookup.values())
     PLAYER_LOOKUP = fresh_lookup
 
 
@@ -178,12 +193,20 @@ def resolve_player_by_name(query: str) -> dict | None:
     return exact or matches[0]
 
 
-async def get_player_overview(athlete_id: str) -> dict:
-    return await fetch_json(ESPN_ATHLETE_OVERVIEW_URL.format(athlete_id=athlete_id))
+async def get_player_overview(athlete_id: str, season: int | None = None) -> dict:
+    if season:
+        url = ESPN_ATHLETE_OVERVIEW_SEASON_URL.format(athlete_id=athlete_id, season=season)
+    else:
+        url = ESPN_ATHLETE_OVERVIEW_URL.format(athlete_id=athlete_id)
+    return await fetch_json(url)
 
 
-async def get_player_gamelog(athlete_id: str) -> dict:
-    return await fetch_json(ESPN_ATHLETE_GAMELOG_URL.format(athlete_id=athlete_id))
+async def get_player_gamelog(athlete_id: str, season: int | None = None) -> dict:
+    if season:
+        url = ESPN_ATHLETE_GAMELOG_SEASON_URL.format(athlete_id=athlete_id, season=season)
+    else:
+        url = ESPN_ATHLETE_GAMELOG_URL.format(athlete_id=athlete_id)
+    return await fetch_json(url)
 
 
 def build_scoreboard_embed(games: list[dict]) -> discord.Embed:
@@ -468,35 +491,67 @@ async def gamestats(interaction: discord.Interaction, team: str):
 
 
 @bot.tree.command(name="playerstats", description="Search a player by name and show stats")
-@app_commands.describe(name="Start typing a player name")
+@app_commands.describe(
+    name="Start typing a player name",
+    season="Season year (e.g. 2023). Leave blank for current season."
+)
 @app_commands.autocomplete(name=player_name_autocomplete)
-async def playerstats(interaction: discord.Interaction, name: str):
+async def playerstats(interaction: discord.Interaction, name: str, season: int | None = None):
     await interaction.response.defer()
+
+    if season and season not in VALID_SEASONS:
+        await interaction.followup.send(f"Invalid season `{season}`. Please enter a year between 2000 and {CURRENT_SEASON}.")
+        return
 
     player = resolve_player_by_name(name)
     if player is None:
         await interaction.followup.send(f"No player found for `{name}`.")
         return
 
-    overview = await get_player_overview(player["id"])
-    await interaction.followup.send(embed=build_player_stats_embed(player, overview))
+    try:
+        overview = await get_player_overview(player["id"], season=season)
+    except Exception:
+        label = f" for the {season} season" if season else ""
+        await interaction.followup.send(f"Could not fetch stats for **{player['name']}**{label}. They may not have data for that year.")
+        return
+
+    embed = build_player_stats_embed(player, overview)
+    if season:
+        embed.title += f" — {season} Season"
+    await interaction.followup.send(embed=embed)
 
 
 @bot.tree.command(name="gamelog", description="Search a player by name and show game log")
-@app_commands.describe(name="Start typing a player name")
+@app_commands.describe(
+    name="Start typing a player name",
+    season="Season year (e.g. 2023). Leave blank for current season."
+)
 @app_commands.autocomplete(name=player_name_autocomplete)
-async def gamelog(interaction: discord.Interaction, name: str):
+async def gamelog(interaction: discord.Interaction, name: str, season: int | None = None):
     await interaction.response.defer()
+
+    if season and season not in VALID_SEASONS:
+        await interaction.followup.send(f"Invalid season `{season}`. Please enter a year between 2000 and {CURRENT_SEASON}.")
+        return
 
     player = resolve_player_by_name(name)
     if player is None:
         await interaction.followup.send(f"No player found for `{name}`.")
         return
 
-    gamelog_data = await get_player_gamelog(player["id"])
+    try:
+        gamelog_data = await get_player_gamelog(player["id"], season=season)
+    except Exception:
+        label = f" for the {season} season" if season else ""
+        await interaction.followup.send(f"Could not fetch game log for **{player['name']}**{label}. They may not have data for that year.")
+        return
+
     entries = extract_gamelog_entries(gamelog_data)
     view = GameLogView(player, entries)
-    await interaction.followup.send(embed=view.build_embed(), view=view)
+    embed = view.build_embed()
+    if season:
+        embed.title += f" — {season} Season"
+    await interaction.followup.send(embed=embed, view=view)
 
 
 @bot.tree.command(name="seahawks", description="Quick Seahawks game update")
