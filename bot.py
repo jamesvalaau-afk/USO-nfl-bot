@@ -294,30 +294,46 @@ def build_player_stats_embed(player: dict, overview: dict) -> discord.Embed:
     if logo:
         embed.set_thumbnail(url=logo)
 
-    statistics = overview.get("statistics", []) or overview.get("stats", [])
+    statistics = overview.get("statistics", {})
     added = 0
 
-    for section in statistics[:8]:
-        label = section.get("displayName") or section.get("name") or "Stats"
-        stats = section.get("stats", [])
-        lines = []
+    if isinstance(statistics, dict):
+        season_label = statistics.get("displayName", "Stats")
+        labels = statistics.get("labels", [])
+        splits = statistics.get("splits", [])
 
-        for stat in stats[:6]:
-            if isinstance(stat, dict):
-                stat_name = stat.get("displayName") or stat.get("name")
-                stat_value = stat.get("displayValue") or stat.get("value")
-                if stat_name and stat_value is not None:
-                    lines.append(f"**{stat_name}:** {stat_value}")
+        for split in splits[:4]:
+            split_name = split.get("displayName", "Stats")
+            stats_vals = split.get("stats", [])
+            lines = []
+            for label, val in zip(labels, stats_vals):
+                if val not in ("0", "0.0", "0.00", "--", ""):
+                    lines.append(f"**{label}:** {val}")
+            if lines:
+                embed.add_field(
+                    name=f"{season_label} — {split_name}"[:256],
+                    value="\n".join(lines[:12])[:1024],
+                    inline=False,
+                )
+                added += 1
 
-        if lines:
-            embed.add_field(name=label[:256], value="\n".join(lines)[:1024], inline=False)
-            added += 1
-
-        if added >= 4:
-            break
+    elif isinstance(statistics, list):
+        for section in statistics[:4]:
+            label = section.get("displayName") or section.get("name") or "Stats"
+            stats = section.get("stats", [])
+            lines = []
+            for stat in stats[:6]:
+                if isinstance(stat, dict):
+                    stat_name = stat.get("displayName") or stat.get("name")
+                    stat_value = stat.get("displayValue") or stat.get("value")
+                    if stat_name and stat_value is not None:
+                        lines.append(f"**{stat_name}:** {stat_value}")
+            if lines:
+                embed.add_field(name=label[:256], value="\n".join(lines)[:1024], inline=False)
+                added += 1
 
     if added == 0:
-        embed.add_field(name="Stats", value="Stats unavailable right now.", inline=False)
+        embed.add_field(name="Stats", value="No stats available for this player/season.", inline=False)
 
     return embed
 
@@ -325,30 +341,48 @@ def build_player_stats_embed(player: dict, overview: dict) -> discord.Embed:
 def extract_gamelog_entries(gamelog: dict) -> list[dict]:
     entries = []
 
-    if "events" in gamelog and isinstance(gamelog["events"], list):
-        for event in gamelog["events"]:
-            opponent = event.get("opponent", {}).get("displayName", "Opponent")
-            date = event.get("date", "Game")
-            stats = event.get("stats", [])
-            stat_parts = []
+    labels = gamelog.get("labels", [])
+    events_dict = gamelog.get("events", {})
+    season_types = gamelog.get("seasonTypes", [])
 
-            for s in stats[:6]:
-                if isinstance(s, dict):
-                    n = s.get("displayName") or s.get("name")
-                    v = s.get("displayValue") or s.get("value")
-                    if n and v is not None:
-                        stat_parts.append(f"{n}: {v}")
+    if isinstance(events_dict, dict) and season_types:
+        for season_type in season_types:
+            season_name = season_type.get("displayName", "")
+            for category in season_type.get("categories", []):
+                for ev in category.get("events", []):
+                    event_id = str(ev.get("eventId", ""))
+                    stats_vals = ev.get("stats", [])
 
-            entries.append({
-                "title": f"{date} vs {opponent}",
-                "value": " • ".join(stat_parts) if stat_parts else "No stats available"
-            })
+                    event_info = events_dict.get(event_id, {})
+                    opponent = event_info.get("opponent", {}).get("abbreviation", "?")
+                    at_vs = event_info.get("atVs", "vs")
+                    game_date = event_info.get("gameDate", "")[:10]
+                    result = event_info.get("gameResult", "")
+                    score = event_info.get("score", "")
+                    week = event_info.get("week", "")
+
+                    stat_parts = []
+                    for label, val in zip(labels, stats_vals):
+                        if val not in ("0", "0.0", "--", ""):
+                            stat_parts.append(f"{label}: {val}")
+
+                    title = f"{at_vs} {opponent}"
+                    if week:
+                        title = f"Wk {week} {title}"
+                    if game_date:
+                        title = f"{game_date} {title}"
+                    if result and score:
+                        title += f" ({result} {score})"
+
+                    entries.append({
+                        "title": f"{season_name} | {title}"[:256],
+                        "value": " • ".join(stat_parts[:10]) or "No stats recorded",
+                    })
 
     if not entries:
-        display = gamelog.get("displayName") or "Game Log"
         entries.append({
-            "title": display,
-            "value": "Game log came back in a different format. Bot is working, but this parser may need a small update."
+            "title": "No game log data",
+            "value": "No game log data found for this player/season.",
         })
 
     return entries
